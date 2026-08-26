@@ -1,9 +1,8 @@
-﻿using System.Runtime.InteropServices;
-using System;
-using System.Diagnostics;
+﻿using System.Diagnostics;
+using System.Net.NetworkInformation;
+using System.Runtime.InteropServices;
 using Microsoft.Data.Sqlite;
-using Microsoft.VisualBasic;
-using System.Runtime.Intrinsics.X86;
+
 partial class Program
 {
     [LibraryImport("user32.dll")]
@@ -11,56 +10,94 @@ partial class Program
 
     [LibraryImport("user32.dll")]
     private static partial uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
-    
-    const string ambiente = "pc";
+
+    static readonly string CaminhoBanco = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "ContextCollector",
+        "contexto.db");
+
+    static readonly string Ambiente = Environment.MachineName;
+
     static void InicializarBanco()
     {
-        using var connection = new SqliteConnection("Data Source=contexto.db");
+        Directory.CreateDirectory(Path.GetDirectoryName(CaminhoBanco)!);
+
+        using var connection = new SqliteConnection($"Data Source={CaminhoBanco}");
         connection.Open();
         var command = connection.CreateCommand();
 
         command.CommandText = """
             CREATE TABLE IF NOT EXISTS eventos (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    ambiente TEXT NOT NULL,
-                    processo TEXT NOT NULL,
-                    inicio TEXT NOT NULL,
-                    fim TEXT NOT NULL,
-                    duracao_segundos REAL NOT NULL,
-                    rede TEXT
-                );
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ambiente TEXT NOT NULL,
+                processo TEXT NOT NULL,
+                inicio TEXT NOT NULL,
+                fim TEXT NOT NULL,
+                duracao_segundos REAL NOT NULL,
+                rede TEXT
+            );
             """;
 
         command.ExecuteNonQuery();
-        
+
+        Console.WriteLine($"Banco: {CaminhoBanco}");
+        Console.WriteLine($"Ambiente: {Ambiente}");
     }
-    
+
+    static string ObterRede()
+    {
+        try
+        {
+            var iface = NetworkInterface.GetAllNetworkInterfaces()
+                .FirstOrDefault(n => n.OperationalStatus == OperationalStatus.Up
+                                  && n.NetworkInterfaceType != NetworkInterfaceType.Loopback);
+
+            return iface?.Name ?? "desconhecida";
+        }
+        catch
+        {
+            return "erro";
+        }
+    }
+
     static void GerarEvento(string processo, DateTime inicio, DateTime fim, double duracao)
     {
-        using var connection = new SqliteConnection("Data Source=contexto.db");
+        using var connection = new SqliteConnection($"Data Source={CaminhoBanco}");
         connection.Open();
         var command = connection.CreateCommand();
-        
+
         command.CommandText = """
-            INSERT INTO eventos (ambiente, processo, inicio, fim, duracao_segundos)
-            VALUES ($ambiente, $processo, $inicio, $fim, $duracao)
-        """;
-        
-        command.Parameters.AddWithValue("$ambiente", ambiente);
+            INSERT INTO eventos (ambiente, processo, inicio, fim, duracao_segundos, rede)
+            VALUES ($ambiente, $processo, $inicio, $fim, $duracao, $rede)
+            """;
+
+        command.Parameters.AddWithValue("$ambiente", Ambiente);
         command.Parameters.AddWithValue("$processo", processo);
         command.Parameters.AddWithValue("$inicio", inicio.ToString("o"));
         command.Parameters.AddWithValue("$fim", fim.ToString("o"));
         command.Parameters.AddWithValue("$duracao", duracao);
+        command.Parameters.AddWithValue("$rede", ObterRede());
 
         command.ExecuteNonQuery();
-
-
     }
+
     static void Main()
     {
         InicializarBanco();
+
         string nomeAnterior = "";
         DateTime inicioAnterior = DateTime.Now;
+
+        Console.CancelKeyPress += (sender, e) =>
+        {
+            if (nomeAnterior != "")
+            {
+                DateTime fim = DateTime.Now;
+                GerarEvento(nomeAnterior, inicioAnterior, fim, (fim - inicioAnterior).TotalSeconds);
+                Console.WriteLine("Último evento gravado.");
+            }
+        };
+
         while (true)
         {
             try
@@ -87,8 +124,6 @@ partial class Program
                     nomeAnterior = nomeProcesso;
                     inicioAnterior = agora;
                 }
-
-
             }
             catch (ArgumentException)
             {
@@ -98,10 +133,8 @@ partial class Program
             {
                 Console.WriteLine(ex.Message);
             }
+
             Thread.Sleep(1000);
         }
     }
 }
-
-// Anota os dois no decisoes.md: você vai precisar de uma lista de processos ignorados, e esses são os dois primeiros. Provavelmente vai crescer — LockApp, ShellExperienceHost, ApplicationFrameHost costumam aparecer também.
-// O último registro nunca fecha — quando você mata o programa, o intervalo em aberto se perde. Por enquanto tudo bem; quando for pro SQLite, vale pensar em capturar o encerramento (pesquisa Console.CancelKeyPress). Não faz agora.
